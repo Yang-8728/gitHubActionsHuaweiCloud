@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: List VPCs via OIDC (with debug)
+      - name: List VPCs via OIDC (Huawei Cloud Global IAM)
         shell: bash
         env:
           HW_REGION:     ${{ secrets.HW_REGION }}       # 例如 ap-southeast-2
@@ -31,7 +31,8 @@ jobs:
           )"
           echo "[1/3] OK. id_token length=${#ID_TOKEN}"
 
-          echo "[2/3] Exchange federated token via IAM"
+          echo "[2/3] Exchange federated token via Huawei Cloud Global IAM"
+          endpoint="https://iam.myhuaweicloud.com"
           body='{"auth":{"identity":{"methods":["oidc"],"oidc":{"id_token":"'"$ID_TOKEN"'"},"provider":{"name":"'"$HW_IDP_NAME"'"},"protocol":{"name":"oidc"}},"scope":{"project":{"id":"'"$HW_PROJECT_ID"'"}}}}'
 
           try_exchange () {
@@ -39,21 +40,18 @@ jobs:
             local path="$2"
             echo "    -> $base$path"
             http=$(curl -sS -D headers.txt -o body.txt -w "%{http_code}" \
-              -H 'Content-Type: application/json' -X POST "$base$path" -d "$body" || true)
+              -H 'Content-Type: application/json' \
+              -H "X-Idp-Id: ${HW_IDP_NAME}" \
+              -H "X-Protocol-Id: oidc" \
+              -X POST "$base$path" -d "$body" || true)
             echo "    <- HTTP $http"
             XST=$(grep -i '^X-Subject-Token:' headers.txt | awk '{print $2}' | tr -d '\r' || true)
           }
 
-          # 依次尝试：区域 v3、区域 v3.0、全局 v3、全局 v3.0
-          try_exchange "https://iam.${HW_REGION}.myhuaweicloud.com" "/v3/OS-FEDERATION/tokens"
+          # 仅使用全局 IAM 端点 (国际站)
+          try_exchange "$endpoint" "/v3/OS-FEDERATION/tokens"
           if [ -z "${XST:-}" ] || [ "${http:-999}" -ge 400 ]; then
-            try_exchange "https://iam.${HW_REGION}.myhuaweicloud.com" "/v3.0/OS-FEDERATION/tokens"
-          fi
-          if [ -z "${XST:-}" ] || [ "${http:-999}" -ge 400 ]; then
-            try_exchange "https://iam.myhuaweicloud.com" "/v3/OS-FEDERATION/tokens"
-          fi
-          if [ -z "${XST:-}" ] || [ "${http:-999}" -ge 400 ]; then
-            try_exchange "https://iam.myhuaweicloud.com" "/v3.0/OS-FEDERATION/tokens"
+            try_exchange "$endpoint" "/v3.0/OS-FEDERATION/tokens"
           fi
 
           if [ -z "${XST:-}" ]; then
@@ -67,4 +65,4 @@ jobs:
           echo "[3/3] List VPCs"
           curl -sS -H "X-Auth-Token: $XST" \
             "https://vpc.${HW_REGION}.myhuaweicloud.com/v1/${HW_PROJECT_ID}/vpcs" \
-          | python -c 'import sys,json; d=json.load(sys.stdin); v=d.get("vpcs",[]); print("VPC count:",len(v)); [print("-",x.get("name")) for x in v]'
+          | python -c 'import sys,json; d=json.load(sys.stdin); v=d.get("vpcs",[]); print("✅ VPC count:",len(v)); [print("-",x.get("name")) for x in v]'
