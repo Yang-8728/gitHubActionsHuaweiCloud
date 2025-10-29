@@ -1,53 +1,42 @@
-name: Verify Huawei Cloud OIDC IdP
+name: List HuaweiCloud VPCs via OIDC
 on: [workflow_dispatch]
 
 permissions:
-  id-token: write      # 必须：允许请求 GitHub OIDC ID Token
+  id-token: write
   contents: read
 
 jobs:
-  verify-oidc:
+  list-vpc:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # 1) 注入必要元信息（不是密钥）
-      - name: Load meta
+      - name: Get OIDC token and list VPCs
+        env:
+          HW_REGION:     ${{ secrets.HW_REGION }}        # 例: ap-southeast-2
+          HW_PROJECT_ID: ${{ secrets.HW_PROJECT_ID }}    # 你的项目ID
+          HW_AUDIENCE:   ${{ secrets.HW_AUDIENCE }}      # 与IdP Client ID一致, 通常 sts.huaweicloud.com
+          HW_IDP_NAME:   ${{ secrets.HW_IDP_NAME }}      # 例: github-actions
+        shell: bash
         run: |
-          echo "HW_REGION=ap-southeast-2"       >> $GITHUB_ENV
-          echo "HW_PROJECT_ID=ee0f846e57794e34bcfdee41b77695e9" >> $GITHUB_ENV
-          echo "HW_IDP_NAME=github-actions"     >> $GITHUB_ENV
-          echo "HW_AUDIENCE=sts.huaweicloud.com"     >> $GITHUB_ENV
+          set -euo pipefail
 
-      # 2) 向 GitHub 请求 OIDC ID Token（audience 要与 IdP 中的 Client ID 一致，常用 sts.huaweicloud.com）
-      - name: Get GitHub OIDC ID Token
-        id: oidc
-        run: |
-          set -e
-          resp=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${HW_AUDIENCE}")
-          ID_TOKEN=$(python - <<'PY'
-import sys, json
-print(json.load(sys.stdin)["value"])
-PY
-<<<"$resp")
-          echo "id_token<<EOF" >> $GITHUB_OUTPUT
-          echo "$ID_TOKEN"     >> $GITHUB_OUTPUT
-          echo "EOF"           >> $GITHUB_OUTPUT
-          echo "✅ Got ID token (length: ${#ID_TOKEN})"
+          echo "🔹 Step 1. Request GitHub OIDC ID token"
+          ID_TOKEN="$(
+            curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${HW_AUDIENCE}" \
+            | python -c 'import sys,json; print(json.load(sys.stdin)["value"])'
+          )"
+          echo "✅ Got ID token (len: ${#ID_TOKEN})"
 
-      # 3) 用 ID Token 向华为云交换联邦 Token（X-Subject-Token）
-      - name: Exchange federated token (Keystone federation)
-        id: keystone
-        run: |
-          set -e
+          echo "🔹 Step 2. Exchange for federated token"
           endpoint="https://iam.${HW_REGION}.myhuaweicloud.com"
           body=$(cat <<JSON
 {
   "auth": {
     "identity": {
       "methods": ["oidc"],
-      "oidc": { "id_token": "${{ steps.oidc.outputs.id_token }}" },
+      "oidc": { "id_token": "${ID_TOKEN}" },
       "provider": { "name": "${HW_IDP_NAME}" },
       "protocol": { "name": "oidc" }
     },
@@ -56,53 +45,14 @@ PY
 }
 JSON
 )
-          # 先试 v3，失败再试 v3.0（不同区域网关版本可能不同）
-          status=$(curl -s -D /tmp/h -o /tmp/b -w "%{http_code}" \
+          http=$(curl -s -D headers.txt -o body.txt -w "%{http_code}" \
             -H "Content-Type: application/json" -X POST \
             "$endpoint/v3/OS-FEDERATION/tokens" -d "$body")
-          if [ "$status" -ge 400 ]; then
-            status=$(curl -s -D /tmp/h -o /tmp/b -w "%{http_code}" \
-              -H "Content-Type: application/json" -X POST \
-              "$endpoint/v3.0/OS-FEDERATION/tokens" -d "$body")
-          fi
-          test "$status" -lt 400 || { echo "❌ Exchange failed: HTTP $status"; cat /tmp/b; exit 1; }
+          test "$http" -lt 400 || { echo "❌ Exchange failed: $http"; cat body.txt; exit 1; }
+          XST=$(grep -i '^X-Subject-Token:' headers.txt | awk '{print $2}' | tr -d '\r')
+          echo "✅ Got federated token (XST length: ${#XST})"
 
-          XST=$(grep -i '^X-Subject-Token:' /tmp/h | awk '{print $2}' | tr -d '\r')
-          echo "xst=$XST" >> $GITHUB_OUTPUT
-
-          echo "✅ Federated token acquired (X-Subject-Token length: ${#XST})"
-          echo "—— Token info ——"
-          cat /tmp/b | python - <<'PY'
-import sys, json
-d=json.load(sys.stdin)
-u=d.get("token",{}).get("user",{})
-roles=d.get("token",{}).get("roles",[])
-prj=d.get("token",{}).get("project",{})
-print("user:", u.get("name"), "domain:", (u.get("domain") or {}).get("name"))
-print("project:", prj.get("id"), prj.get("name"))
-print("roles:", [r.get("name") for r in roles])
-PY
-
-      # 4) 用联邦 Token 调用 IAM / VPC 证明可用（不涉及资源更改）
-      - name: Call IAM (list projects) with federated token
-        run: |
-          curl -sSf -H "X-Auth-Token: ${{ steps.keystone.outputs.xst }}" \
-            "https://iam.${HW_REGION}.myhuaweicloud.com/v3/projects" \
-            | python - <<'PY'
-import sys, json
-ps=json.load(sys.stdin).get("projects",[])
-print("✅ IAM list projects OK, count:", len(ps))
-print([p["name"] for p in ps])
-PY
-
-      - name: Call VPC (list VPCs) with federated token
-        run: |
-          curl -sS -H "X-Auth-Token: ${{ steps.keystone.outputs.xst }}" \
+          echo "🔹 Step 3. List VPCs"
+          curl -s -H "X-Auth-Token: $XST" \
             "https://vpc.${HW_REGION}.myhuaweicloud.com/v1/${HW_PROJECT_ID}/vpcs" \
-            | python - <<'PY'
-import sys, json
-d=json.load(sys.stdin)
-vpcs=d.get("vpcs",[])
-print("✅ VPC list OK, count:", len(vpcs))
-print([v.get("name") for v in vpcs])
-PY
+          | python -c 'import sys,json; d=json.load(sys.stdin); v=d.get("vpcs",[]); print("✅ VPC count:",len(v)); [print(" -",x.get("name")) for x in v]'
