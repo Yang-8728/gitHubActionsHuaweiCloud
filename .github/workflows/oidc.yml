@@ -41,7 +41,7 @@ jobs:
             echo "    -> $base$path"
             http=$(curl -sS -D headers.txt -o body.txt -w "%{http_code}" \
               -H 'Content-Type: application/json' \
-              -H "X-Idp-Id: ${HW_IDP_NAME}" \
+              -H "X-Idp-Id: ${HW_IDP_ID}" \
               -H "X-Protocol-Id: oidc" \
               -X POST "$base$path" -d "$body" || true)
             echo "    <- HTTP $http"
