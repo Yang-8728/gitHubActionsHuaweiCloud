@@ -13,10 +13,10 @@ jobs:
       # Step 2: Export Huawei Cloud credentials as environment variables
       - name: Set Huawei Cloud credentials
         run: |
-          echo "HW_AK=HPUA5GZJCTJM32UD9X1W" >> $GITHUB_ENV
-          echo "HW_SK=zlzFxhnxtjEssQ6pKa9Ugsqh8Q5aJSUdqslwymJK" >> $GITHUB_ENV
-          echo "HW_REGION=ap-southeast-2" >> $GITHUB_ENV
-          echo "HW_PROJECT_ID=ee0f846e57794e34bcfdee41b77695e9" >> $GITHUB_ENV
+          echo "HW_AK=${{ secrets.HW_AK }}" >> $GITHUB_ENV
+          echo "HW_SK=${{ secrets.HW_SK }}" >> $GITHUB_ENV
+          echo "HW_REGION=${{ secrets.HW_REGION }}" >> $GITHUB_ENV
+          echo "HW_PROJECT_ID=${{ secrets.HW_PROJECT_ID }}" >> $GITHUB_ENV
 
       # Step 3: Install Huawei Cloud SDK and perform a signed API call (read-only)
       - name: Verify AK/SK by signed SDK call (IAM list projects)
