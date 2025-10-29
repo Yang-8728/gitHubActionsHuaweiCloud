@@ -1,0 +1,66 @@
+name: HuaweiCloud AKSK Signed Check
+on:
+  workflow_dispatch:
+
+jobs:
+  signed-check:
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Checkout repository (required)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Step 2: Export Huawei Cloud credentials as environment variables
+      - name: Set Huawei Cloud credentials
+        run: |
+          echo "HW_AK=HPUA5GZJCTJM32UD9X1W" >> $GITHUB_ENV
+          echo "HW_SK=zlzFxhnxtjEssQ6pKa9Ugsqh8Q5aJSUdqslwymJK" >> $GITHUB_ENV
+          echo "HW_REGION=ap-southeast-2" >> $GITHUB_ENV
+          echo "HW_PROJECT_ID=ee0f846e57794e34bcfdee41b77695e9" >> $GITHUB_ENV
+
+      # Step 3: Install Huawei Cloud SDK and perform a signed API call (read-only)
+      - name: Verify AK/SK by signed SDK call (IAM list projects)
+        run: |
+          python -V
+          pip install --upgrade pip
+          pip install "huaweicloudsdkcore>=3.1.99" "huaweicloudsdkiam>=3.1.99"
+
+          python - <<'PY'
+          import os
+          from huaweicloudsdkcore.auth.credentials import BasicCredentials
+          from huaweicloudsdkcore.exceptions import exceptions
+          from huaweicloudsdkcore.http.http_config import HttpConfig
+          from huaweicloudsdkiam.v3 import IamClient, KeystoneListProjectsRequest
+
+          ak = os.getenv("HW_AK")
+          sk = os.getenv("HW_SK")
+          region = os.getenv("HW_REGION")
+          project_id = os.getenv("HW_PROJECT_ID")
+
+          assert ak and sk and region and project_id, "❌ Missing HW_AK/HW_SK/HW_REGION/HW_PROJECT_ID"
+
+          endpoint = f"https://iam.{region}.myhuaweicloud.com"
+
+          # Build IAM client using AK/SK (SDK automatically signs the request)
+          http_config = HttpConfig.get_default_config()
+          http_config.ignore_ssl_verification = False
+          cred = BasicCredentials(ak, sk, project_id)
+          client = (
+              IamClient.new_builder()
+              .with_http_config(http_config)
+              .with_credentials(cred)
+              .with_endpoint(endpoint)
+              .build()
+          )
+
+          try:
+              resp = client.keystone_list_projects(KeystoneListProjectsRequest())
+              projects = resp.projects or []
+              print(f"✅ Signed request succeeded. Number of projects: {len(projects)}")
+              for p in projects:
+                  print(f"- {p.name:20s} | ID: {p.id}")
+              print("Result: AK/SK are valid and can authenticate to Huawei Cloud IAM (read-only, no resource changes).")
+          except exceptions.ClientRequestException as e:
+              print(f"❌ Request failed: {e.status_code} {e.error_msg}")
+              print("Hint: Verify region/project_id match and that the AK/SK have IAM read permission.")
+              raise
