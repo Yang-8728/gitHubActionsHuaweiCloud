@@ -18,6 +18,7 @@ jobs:
           HW_PROJECT_ID: ${{ secrets.HW_PROJECT_ID }}   # 项目ID
           HW_AUDIENCE:   ${{ secrets.HW_AUDIENCE }}     # 与 IdP 的 Client ID 一致，通常 sts.huaweicloud.com
           HW_IDP_NAME:   ${{ secrets.HW_IDP_NAME }}     # 例如 github-actions
+          HW_IDP_ID:     ${{ secrets.HW_IDP_ID }} 
         run: |
           set -euo pipefail
 
