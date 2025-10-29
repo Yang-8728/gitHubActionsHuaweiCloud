@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: List VPCs via OIDC
+      - name: List VPCs via OIDC (with debug)
         shell: bash
         env:
           HW_REGION:     ${{ secrets.HW_REGION }}       # 例如 ap-southeast-2
@@ -21,29 +21,50 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 1) 向 GitHub 申请 OIDC ID token
-          ID_TOKEN=$(
+          echo "[DEBUG] REGION=$HW_REGION  PROJECT_ID=$HW_PROJECT_ID  IDP=$HW_IDP_NAME  AUD=$HW_AUDIENCE"
+
+          echo "[1/3] Request GitHub OIDC ID token"
+          ID_TOKEN="$(
             curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
               "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${HW_AUDIENCE}" \
             | python -c 'import sys,json; print(json.load(sys.stdin)["value"])'
-          )
+          )"
+          echo "[1/3] OK. id_token length=${#ID_TOKEN}"
 
-          # 2) 用 ID token 向华为云换取联邦 Token (X-Subject-Token)
-          endpoint="https://iam.${HW_REGION}.myhuaweicloud.com"
+          echo "[2/3] Exchange federated token via IAM"
           body='{"auth":{"identity":{"methods":["oidc"],"oidc":{"id_token":"'"$ID_TOKEN"'"},"provider":{"name":"'"$HW_IDP_NAME"'"},"protocol":{"name":"oidc"}},"scope":{"project":{"id":"'"$HW_PROJECT_ID"'"}}}}'
 
-          # 先试 v3，失败则试 v3.0（不同区域网关版本可能不同）
-          curl -s -D headers.txt -o body.txt -H 'Content-Type: application/json' \
-            -X POST "$endpoint/v3/OS-FEDERATION/tokens" -d "$body" > /dev/null || true
-          XST=$(grep -i '^X-Subject-Token:' headers.txt | awk '{print $2}' | tr -d '\r')
-          if [ -z "$XST" ]; then
-            curl -s -D headers.txt -o body.txt -H 'Content-Type: application/json' \
-              -X POST "$endpoint/v3.0/OS-FEDERATION/tokens" -d "$body" > /dev/null
-            XST=$(grep -i '^X-Subject-Token:' headers.txt | awk '{print $2}' | tr -d '\r')
-          fi
-          test -n "$XST" || { echo "Failed to get federated token"; cat body.txt; exit 1; }
+          try_exchange () {
+            local base="$1"
+            local path="$2"
+            echo "    -> $base$path"
+            http=$(curl -sS -D headers.txt -o body.txt -w "%{http_code}" \
+              -H 'Content-Type: application/json' -X POST "$base$path" -d "$body" || true)
+            echo "    <- HTTP $http"
+            XST=$(grep -i '^X-Subject-Token:' headers.txt | awk '{print $2}' | tr -d '\r' || true)
+          }
 
-          # 3) 列出 VPC 名称
-          curl -s -H "X-Auth-Token: $XST" \
+          # 依次尝试：区域 v3、区域 v3.0、全局 v3、全局 v3.0
+          try_exchange "https://iam.${HW_REGION}.myhuaweicloud.com" "/v3/OS-FEDERATION/tokens"
+          if [ -z "${XST:-}" ] || [ "${http:-999}" -ge 400 ]; then
+            try_exchange "https://iam.${HW_REGION}.myhuaweicloud.com" "/v3.0/OS-FEDERATION/tokens"
+          fi
+          if [ -z "${XST:-}" ] || [ "${http:-999}" -ge 400 ]; then
+            try_exchange "https://iam.myhuaweicloud.com" "/v3/OS-FEDERATION/tokens"
+          fi
+          if [ -z "${XST:-}" ] || [ "${http:-999}" -ge 400 ]; then
+            try_exchange "https://iam.myhuaweicloud.com" "/v3.0/OS-FEDERATION/tokens"
+          fi
+
+          if [ -z "${XST:-}" ]; then
+            echo "❌ Failed to exchange federated token."
+            echo "---- Response headers ----"; cat headers.txt || true
+            echo "---- Response body ----"; cat body.txt || true
+            exit 1
+          fi
+          echo "[2/3] OK. X-Subject-Token length=${#XST}"
+
+          echo "[3/3] List VPCs"
+          curl -sS -H "X-Auth-Token: $XST" \
             "https://vpc.${HW_REGION}.myhuaweicloud.com/v1/${HW_PROJECT_ID}/vpcs" \
-          | python -c 'import sys,json; d=json.load(sys.stdin); v=d.get("vpcs",[]); print("VPC count:", len(v)); [print("-", x.get("name")) for x in v]'
+          | python -c 'import sys,json; d=json.load(sys.stdin); v=d.get("vpcs",[]); print("VPC count:",len(v)); [print("-",x.get("name")) for x in v]'
